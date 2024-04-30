@@ -451,7 +451,7 @@ func (s *Server) serveConn(conn net.Conn) {
 		ctx := share.WithValue(context.Background(), RemoteConnContextKey, conn)
 
 		// read a request from the underlying connection
-		req, err := s.readRequest(ctx, r)
+		req, data, err := s.readRequest(ctx, r)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				log.Infof("client has closed this connection: %s", conn.RemoteAddr().String())
@@ -467,6 +467,8 @@ func (s *Server) serveConn(conn net.Conn) {
 				} else { // Oneway and only call the plugins
 					s.Plugins.DoPreWriteResponse(ctx, req, nil, err)
 				}
+
+				protocol.PutData(data)
 				continue
 			} else { // wrong data
 				log.Warnf("rpcx: failed to read request: %v", err)
@@ -476,6 +478,7 @@ func (s *Server) serveConn(conn net.Conn) {
 				s.HandleServiceError(err)
 			}
 
+			protocol.PutData(data)
 			return
 		}
 
@@ -507,17 +510,23 @@ func (s *Server) serveConn(conn net.Conn) {
 			// auth failed, closed the connection
 			if closeConn {
 				log.Infof("auth failed for conn %s: %v", conn.RemoteAddr().String(), err)
+				protocol.PutData(data)
 				return
 			}
+			protocol.PutData(data)
 			continue
 		}
 
 		if s.pool != nil {
 			s.pool.Submit(func() {
 				s.processOneRequest(ctx, req, conn)
+				protocol.PutData(data)
 			})
 		} else {
-			go s.processOneRequest(ctx, req, conn)
+			go func() {
+				s.processOneRequest(ctx, req, conn)
+				protocol.PutData(data)
+			}()
 		}
 	}
 }
@@ -653,22 +662,22 @@ func (s *Server) closeConn(conn net.Conn) {
 	s.Plugins.DoPostConnClose(conn)
 }
 
-func (s *Server) readRequest(ctx context.Context, r io.Reader) (req *protocol.Message, err error) {
+func (s *Server) readRequest(ctx context.Context, r io.Reader) (req *protocol.Message, data *[]byte, err error) {
 	err = s.Plugins.DoPreReadRequest(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// pool req?
 	req = protocol.NewMessage()
-	err = req.Decode(r)
+	data, err = req.Decode(r)
 	if err == io.EOF {
-		return req, err
+		return req, data, err
 	}
 	perr := s.Plugins.DoPostReadRequest(ctx, req, err)
 	if err == nil {
 		err = perr
 	}
-	return req, err
+	return req, data, err
 }
 
 func (s *Server) auth(ctx context.Context, req *protocol.Message) error {

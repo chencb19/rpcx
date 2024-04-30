@@ -636,8 +636,9 @@ func (client *Client) input() {
 			_ = client.Conn.SetDeadline(time.Now().Add(client.option.IdleTimeout))
 		}
 
-		err = res.Decode(client.r)
+		data, err := res.Decode(client.r)
 		if err != nil {
+			protocol.PutData(data)
 			break
 		}
 		if client.Plugins != nil {
@@ -664,6 +665,7 @@ func (client *Client) input() {
 				if client.ServerMessageChan != nil {
 					client.handleServerRequest(res)
 				}
+				protocol.PutData(data)
 				continue
 			}
 		case res.MessageStatusType() == protocol.Error:
@@ -715,6 +717,7 @@ func (client *Client) input() {
 
 			call.done()
 		}
+		protocol.PutData(data)
 	}
 	// Terminate pending calls.
 

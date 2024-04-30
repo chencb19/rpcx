@@ -12,7 +12,7 @@ import (
 	"github.com/smallnest/rpcx/util"
 )
 
-var bufferPool = util.NewLimitedPool(512, 4096)
+var bufferPool = util.NewLimitedPool(512<<10, 5<<20) // 512KB-5MB
 
 // Compressors are compressors supported by rpcx. You can add customized compressor in Compressors.
 var Compressors = map[CompressType]Compressor{
@@ -101,7 +101,7 @@ type Message struct {
 	ServiceMethod string
 	Metadata      map[string]string
 	Payload       []byte
-	data          []byte
+	// data          []byte
 }
 
 // NewMessage creates an empty message.
@@ -284,7 +284,9 @@ func (m Message) EncodeSlicePointer() *[]byte {
 
 // PutData puts the byte slice into pool.
 func PutData(data *[]byte) {
-	bufferPool.Put(data)
+	if data != nil {
+		bufferPool.Put(data)
+	}
 }
 
 // WriteTo writes message to writers.
@@ -403,17 +405,17 @@ func decodeMetadata(l uint32, data []byte) (map[string]string, error) {
 }
 
 // Read reads a message from r.
-func Read(r io.Reader) (*Message, error) {
-	msg := NewMessage()
-	err := msg.Decode(r)
-	if err != nil {
-		return nil, err
-	}
-	return msg, nil
-}
+// func Read(r io.Reader) (*Message, error) {
+// 	msg := NewMessage()
+// 	err := msg.Decode(r)
+// 	if err != nil {
+// 		return nil, err
+// 	}
+// 	return msg, nil
+// }
 
 // Decode decodes a message from reader.
-func (m *Message) Decode(r io.Reader) error {
+func (m *Message) Decode(r io.Reader) (*[]byte, error) {
 	defer func() {
 		if err := recover(); err != nil {
 			var errStack = make([]byte, 1024)
@@ -426,39 +428,40 @@ func (m *Message) Decode(r io.Reader) error {
 	// parse header
 	_, err := io.ReadFull(r, m.Header[:1])
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !m.Header.CheckMagicNumber() {
-		return fmt.Errorf("wrong magic number: %v", m.Header[0])
+		return nil, fmt.Errorf("wrong magic number: %v", m.Header[0])
 	}
 
 	_, err = io.ReadFull(r, m.Header[1:])
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// total
 	lenData := make([]byte, 4)
 	_, err = io.ReadFull(r, lenData)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	l := binary.BigEndian.Uint32(lenData)
 
 	if MaxMessageLength > 0 && int(l) > MaxMessageLength {
-		return ErrMessageTooLong
+		return nil, ErrMessageTooLong
 	}
 
 	totalL := int(l)
-	if cap(m.data) >= totalL { // reuse data
-		m.data = m.data[:totalL]
-	} else {
-		m.data = make([]byte, totalL)
-	}
-	data := m.data
+	// if cap(m.data) >= totalL { // reuse data
+	// 	m.data = m.data[:totalL]
+	// } else {
+	// 	m.data = bufferPool.Get(l)
+	// }
+	dataPtr := bufferPool.Get(totalL)
+	data := *dataPtr
 	_, err = io.ReadFull(r, data)
 	if err != nil {
-		return err
+		return dataPtr, err
 	}
 
 	n := 0
@@ -484,7 +487,7 @@ func (m *Message) Decode(r io.Reader) error {
 	if l > 0 {
 		m.Metadata, err = decodeMetadata(l, data[n:nEnd])
 		if err != nil {
-			return err
+			return dataPtr, err
 		}
 	}
 	n = nEnd
@@ -498,15 +501,15 @@ func (m *Message) Decode(r io.Reader) error {
 	if m.CompressType() != None {
 		compressor := Compressors[m.CompressType()]
 		if compressor == nil {
-			return ErrUnsupportedCompressor
+			return dataPtr, ErrUnsupportedCompressor
 		}
 		m.Payload, err = compressor.Unzip(m.Payload)
 		if err != nil {
-			return err
+			return dataPtr, err
 		}
 	}
 
-	return err
+	return dataPtr, err
 }
 
 // Reset clean data of this message but keep allocated data
@@ -514,7 +517,7 @@ func (m *Message) Reset() {
 	resetHeader(m.Header)
 	m.Metadata = nil
 	m.Payload = []byte{}
-	m.data = m.data[:0]
+	// m.data = m.data[:0]
 	m.ServicePath = ""
 	m.ServiceMethod = ""
 }
